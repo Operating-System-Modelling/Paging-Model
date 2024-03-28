@@ -42,9 +42,15 @@ void system_init(void) {
     //Ashan's change
     frame_table = (fte_t *) mem;
 
-    memset(frame_table, 0, PAGE_SIZE * (NUM_FRAMES/8*sizeof(uint8_t)));
+    for (int i = 0; i < NUM_FRAMES; i++) {
+        frame_table[i].protected = 0;
+        frame_table[i].referenced = 0;
+        frame_table[i].mapped = 0;
+        frame_table[i].process = NULL;
+        frame_table[i].vpn = 0;
+    }
 
-    page_table = malloc(PAGE_SIZE);   // Allocate virtual memory for page table
+
 
     
 
@@ -85,20 +91,11 @@ void proc_init(pcb_t *proc) {
  
     //Ashan's Change
     // Allocate a page for the process's page table
-    unsigned int page_table_page = free_frame();
+    pfn_t frameIndex =free_frame();
+    uint8_t* newFrame = (uint8_t*) mem + (frameIndex * PAGE_SIZE);
+    memset(newFrame,0,PAGE_SIZE);
 
-    if (proc->saved_ptbr == -1) {
-        // Handle running out of memory
-        return;
-    }
-    // Zero-out the memory
-    memset((char *)(mem + (page_table_page * PAGE_SIZE)), 0, PAGE_SIZE);
 
-    // Record the PFN of the page table
-    proc->saved_ptbr = page_table_page;
-
-    // Mark the page table as protected
-    frame_table[page_table_page].protected = 1;
 
     //Ashan's chnage
 
@@ -109,6 +106,8 @@ void proc_init(pcb_t *proc) {
      * Additionally, mark the frame's frame table entry as protected. You do not
      * want your page table to be accidentally evicted.
      */
+    proc->saved_ptbr = frameIndex;
+    frame_table[frameIndex].protected = 1;
 
 }
 
@@ -161,24 +160,26 @@ void context_switch(pcb_t *proc) {
     -----------------------------------------------------------------------------------
  */
 uint8_t mem_access(vaddr_t address, char rw, uint8_t data) {
-
+    stats.accesses++;
 
     /* Split the address and find the page table entry */
     //Ashan's change
-    unsigned int page_number = vaddr_vpn(address);
-    unsigned int offset = vaddr_offset(address);
+    vpn_t vpn = vaddr_vpn(address);
+    uint16_t offset = vaddr_offset(address);
+    pte_t* page_table = (pte_t*)(mem + (PTBR * PAGE_SIZE));
+    pte_t* pte = (pte_t*)page_table + vpn;
 
-    pte_t pte = page_table[page_number];
+    
 
 
 
     /* If an entry is invalid, just page fault to allocate a page for the page table. */
-    if (pte.valid == 0) {
+    if (pte->valid == 0) {
         page_fault(address);
     }
 
     /* Set the "referenced" bit to reduce the page's likelihood of eviction */
-    frame_table[pte.pfn].referenced = 1;
+    frame_table[pte->pfn].referenced = 1;
 
     /*
         The physical address will be constructed like this:
@@ -191,15 +192,17 @@ uint8_t mem_access(vaddr_t address, char rw, uint8_t data) {
         Create the physical address using your offset and the page
         table entry.
     */
-    paddr_t physical_address = (pte.pfn << OFFSET_LEN) | offset;
+    paddr_t* physical_address = (paddr_t*)(mem+ pte->pfn * PAGE_SIZE + offset);
     
     /* Either read or write the data to the physical address
        depending on 'rw' */
     if (rw == 'r') {
-        return mem[physical_address];
+        stats.reads++;
+        return mem[*physical_address];
     } else {
-        pte.dirty = 1;   // Mark it as dirty before writing
-        mem[physical_address] = data;
+        stats.writes++;
+        pte->dirty = 1;
+        (*physical_address) = data;
         return data;
     }
 }
@@ -219,30 +222,24 @@ uint8_t mem_access(vaddr_t address, char rw, uint8_t data) {
 void proc_cleanup(pcb_t *proc)
 {
     /* Look up the process's page table */
+    pfn_t current = proc->saved_ptbr;
+    pte_t* page_table = (pte_t*)(mem + (current * PAGE_SIZE));
 
     /* Iterate the page table and clean up each valid page */
     for (size_t i = 0; i < NUM_PAGES; i++)
     {
-        pte_t entry = page_table[i];
-        if (!entry.valid)
+        if (page_table[i].valid)
         {
-            continue;
+            frame_table[page_table[i].pfn].mapped = 0;
         }
 
-        pfn_t pfn = entry.pfn;
-
-        if (entry.swap)
-        {
-            swap_free(&entry);
+        if (swap_exists(&page_table[i])) {
+            swap_free(&page_table[i]);
         }
 
-        frame_table[pfn].protected = 0;
-        frame_table[pfn].referenced = 0;
-        frame_table[pfn].mapped = 0;
-        frame_table[pfn].vpn = 0;
+        frame_table[proc->saved_ptbr].protected = 0;
     }
 
     /* Free the page table itself in the frame table */
-    frame_table[proc->saved_ptbr].protected = 0;
-    frame_table[proc->saved_ptbr].referenced = 0;
+    free(page_table);
 }

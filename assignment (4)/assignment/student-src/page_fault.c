@@ -25,24 +25,28 @@
     ----------------------------------------------------------------------------------
  */
 void page_fault(vaddr_t address) {
+  stats.page_faults++;
     /* First, split the faulting address and locate the page table entry */
       vpn_t vpn = vaddr_vpn(address);
+      uint16_t offset =vaddr_offset(address);
+      pte_t* page_table = (pte_t *) (mem + PTBR * PAGE_SIZE);
+      pte_t* pte =  (pte_t*) (page_table + vpn);
 
 
     /* It's a page fault, so the entry obviously won't be valid. Grab
        a frame to use by calling free_frame(). */
-      pfn_t pfn = free_frame();
+      pfn_t freed_frame = free_frame();
 
     /* Update the page table entry. Make sure you set any relevant bits. */
-      page_table[vpn].swap = 1;
-      page_table[vpn].valid = 1;
-      page_table[vpn].pfn = pfn;
+      pte->pfn = freed_frame;
+      pte->dirty = 0;
+      pte->valid = 1;
 
     /* Update the frame table. Make sure you set any relevant bits. */
-   frame_table[pfn].mapped = 1;
-   frame_table[pfn].referenced = 1;
-   frame_table[pfn].process = current_process;
-   frame_table[pfn].vpn = vpn;
+   frame_table[freed_frame].mapped = 1;
+   frame_table[freed_frame].referenced = 1;
+   frame_table[freed_frame].process = current_process;
+   frame_table[freed_frame].vpn = vpn;
 
 
     /* Initialize the page's memory. On a page fault, it is not enough
@@ -58,16 +62,12 @@ void page_fault(vaddr_t address) {
      * Otherwise, zero the page's memory. If the page is later written
      * back, swap_write() will automatically allocate a swap entry.
      */
-
-    if (page_table[vpn].swap) {
-      swap_read(page_table[vpn].swap, (void *)vaddr_page(address));
+    
+    void *new_frame = (void *) (mem + (freed_frame * PAGE_SIZE));
+    if (swap_exists(pte)) {
+      swap_read(pte,freed_frame);
     } else {
-      memset((void *)vaddr_page(address), 0, PAGE_SIZE);
-    }
-
-    frame_table[pfn].referenced = 1;
-    if (page_table[vpn].dirty) {
-      frame_table[pfn].referenced = 1;
+      memset(new_frame, 0, PAGE_SIZE * sizeof(uint8_t));
     }
 
 }
